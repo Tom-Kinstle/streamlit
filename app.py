@@ -286,33 +286,11 @@ class HOAQASystem:
         # Create vector store directory
         hoa_db_dir = self.vectorstore_base_dir / f"hoa_chroma_db_{hoa_name.lower().replace(' ', '_')}"
         
-        # Try to load existing vector store first
-        if hoa_db_dir.exists():
-            try:
-                vs = Chroma(
-                    persist_directory=str(hoa_db_dir),
-                    embedding_function=self.embedding_model
-                )
-                self.vector_stores[hoa_name] = vs
-                print(f"Loaded existing HOA: {hoa_name}")
-                
-                return {
-                    "success": True,
-                    "message": f"Successfully loaded existing HOA: {hoa_name}",
-                    "hoa_name": hoa_name,
-                    "document_count": len(pdf_files),
-                    "chunk_count": 0
-                }
-            except Exception as e:
-                print(f"Could not load existing vector store: {e}")
-                # Only remove if we absolutely have to
-                pass
-
+        # Use in-memory ChromaDB (no SQLite dependency)
         try:
             vs = Chroma.from_documents(
                 documents=all_documents,
                 embedding=self.embedding_model,
-                persist_directory=str(hoa_db_dir),
                 collection_metadata={"hnsw:space": "cosine"}
             )
             self.vector_stores[hoa_name] = vs
