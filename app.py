@@ -1,177 +1,46 @@
-# HOA Document Q&A System - Deployment Version
-
+# Simplified HOA Document Q&A System for Streamlit Cloud
 import os
 import glob
 import re
-import shutil
 from pathlib import Path
-from typing import List, Dict, Optional, TypedDict
-
-import torch
+from typing import List, Dict, Optional
 import streamlit as st
-from dotenv import load_dotenv
 from openai import OpenAI
-
-from langchain_community.vectorstores import Chroma
-from langchain_huggingface import HuggingFaceEmbeddings
-from langchain.schema import Document
-from langchain.text_splitter import RecursiveCharacterTextSplitter
-
-# PDF processing imports
+from sentence_transformers import SentenceTransformer
+from sklearn.metrics.pairwise import cosine_similarity
+import numpy as np
 import fitz  # PyMuPDF
-# Removed Google Drive dependencies - documents now in git repo
 
+class Document:
+    def __init__(self, page_content: str, metadata: dict = None):
+        self.page_content = page_content
+        self.metadata = metadata or {}
 
-# --------------------
-# Data models
-# --------------------
-class QueryState(TypedDict):
-    question: str
-    hoa_name: str
-    retrieved_chunks: List[Document]
-    answer: str
-    error: Optional[str]
-
-
-# --------------------
-# Main HOA Q&A System Class
-# --------------------
-class HOAQASystem:
+class SimpleHOASystem:
     def __init__(self):
-        """Initialize the HOA Q&A System."""
-        self.load_environment()
-        self.setup_directories()
-        self.initialize_openai_client()
-        
-        # Global state
-        self.vector_stores: Dict[str, Chroma] = {}
-        self.embedding_model: Optional[HuggingFaceEmbeddings] = None
-        
-        # Configuration
-        self.chunk_size = 1000
-        self.chunk_overlap = 200
-
-    def load_environment(self):
-        """Load and validate environment variables."""
-        load_dotenv()
-        
-        # Try Streamlit secrets first, then environment variables  
-        self.openai_api_key = None
+        # Get API key from Streamlit secrets
         try:
-            # Import should be at module level, but try here if needed
-            self.openai_api_key = st.secrets.get("OPENAI_API_KEY")
-        except Exception as e:
-            print(f"Streamlit secrets error: {e}")
-            pass
-            
-        # Fallback to environment variable
-        if not self.openai_api_key:
-            self.openai_api_key = os.getenv("OPENAI_API_KEY")
-            
-        if not self.openai_api_key:
-            raise ValueError("OPENAI_API_KEY not found in Streamlit secrets or environment variables")
-        
-        # Documents are now stored locally in the git repo
-        
-        # For deployment, use a default data directory or allow environment override
-        try:
-            import streamlit as st
-            hoa_base_dir_env = st.secrets.get("HOA_BASE_DIR")
+            self.openai_api_key = st.secrets["OPENAI_API_KEY"]
         except:
-            hoa_base_dir_env = None
-            
-        if not hoa_base_dir_env:
-            hoa_base_dir_env = os.getenv("HOA_BASE_DIR")
-            
-        if hoa_base_dir_env:
-            self.hoa_base_dir = Path(hoa_base_dir_env).resolve()
-        else:
-            # Default to a data directory in the app folder
-            self.hoa_base_dir = Path(__file__).parent / "data"
-            self.hoa_base_dir.mkdir(parents=True, exist_ok=True)
+            self.openai_api_key = os.getenv("OPENAI_API_KEY")
         
-        # Documents are stored in git repo - no download needed
-
-    def setup_directories(self):
-        """Setup required directories."""
-        self.vectorstore_base_dir = Path(__file__).parent / "vectorstores"
-        self.vectorstore_base_dir.mkdir(exist_ok=True)
-
-    def initialize_openai_client(self):
-        """Initialize the OpenAI client."""
+        if not self.openai_api_key:
+            st.error("OpenAI API key not found in secrets or environment")
+            st.stop()
+            
         self.client = OpenAI(api_key=self.openai_api_key)
-
-    def setup_embedding_model(self) -> HuggingFaceEmbeddings:
-        """Setup and return the embedding model."""
-        device = "cuda" if torch.cuda.is_available() else "cpu"
-        return HuggingFaceEmbeddings(
-            model_name="BAAI/bge-large-en-v1.5",
-            model_kwargs={"device": device, "trust_remote_code": True},
-            encode_kwargs={"normalize_embeddings": True, "batch_size": 16}
-        )
-
-    def ensure_documents_downloaded_REMOVED(self):
-        """Download HOA documents from Google Drive if not present locally."""
-        if self.hoa_base_dir.exists() and any(self.hoa_base_dir.iterdir()):
-            print("HOA documents found locally, skipping download.")
-            return
+        self.hoa_base_dir = Path(__file__).parent / "data"
         
-        print(f"HOA base directory: {self.hoa_base_dir}")
-        print(f"Directory exists: {self.hoa_base_dir.exists()}")
-        if self.hoa_base_dir.exists():
-            print(f"Directory contents: {list(self.hoa_base_dir.iterdir())}")
-        
-        print("Downloading HOA documents from Google Drive...")
-        try:
-            # Create temporary download directory
-            temp_dir = Path(__file__).parent / "temp_download"
-            temp_dir.mkdir(exist_ok=True)
-            
-            # Download the entire folder as zip
-            zip_url = f"https://drive.google.com/uc?id={self.google_drive_folder_id}&export=download"
-            
-            # Use requests for the download with session handling
-            session = requests.Session()
-            response = session.get(zip_url, stream=True)
-            
-            if response.status_code == 200:
-                zip_path = temp_dir / "hoa_documents.zip"
-                with open(zip_path, 'wb') as f:
-                    for chunk in response.iter_content(chunk_size=8192):
-                        f.write(chunk)
-                
-                # Extract the zip file
-                with zipfile.ZipFile(zip_path, 'r') as zip_ref:
-                    zip_ref.extractall(temp_dir)
-                
-                # Move extracted content to the HOA base directory
-                extracted_folders = [d for d in temp_dir.iterdir() if d.is_dir()]
-                if extracted_folders:
-                    # If there's a main folder, move its contents
-                    main_folder = extracted_folders[0]
-                    if main_folder.name != "hoa_documents":
-                        for item in main_folder.iterdir():
-                            if item.is_dir():
-                                shutil.move(str(item), str(self.hoa_base_dir))
-                    else:
-                        # Move the hoa_documents folder contents
-                        for item in main_folder.iterdir():
-                            if item.is_dir():
-                                shutil.move(str(item), str(self.hoa_base_dir))
-                
-                # Clean up
-                shutil.rmtree(temp_dir)
-                print("HOA documents downloaded and extracted successfully!")
-                
-            else:
-                print(f"Failed to download documents. Status code: {response.status_code}")
-                
-        except Exception as e:
-            print(f"Error downloading HOA documents: {e}")
-            # Continue without documents - app will show appropriate message
+        # Simple storage
+        self.hoa_documents: Dict[str, List[Document]] = {}
+        self.hoa_embeddings: Dict[str, np.ndarray] = {}
+        self.embedding_model = None
 
-    def extract_pdf_text_pymupdf(self, file_path: str) -> str:
-        """Extract text from PDF using PyMuPDF (fitz)."""
+    @st.cache_resource
+    def get_embedding_model(_self):
+        return SentenceTransformer('all-MiniLM-L6-v2')  # Smaller, faster model
+
+    def extract_pdf_text(self, file_path: str) -> str:
         try:
             text = ""
             doc = fitz.open(file_path)
@@ -181,169 +50,119 @@ class HOAQASystem:
             doc.close()
             return text.strip()
         except Exception as e:
-            print(f"PyMuPDF failed for {file_path}: {e}")
+            st.error(f"PDF extraction failed for {file_path}: {e}")
             return ""
 
-    def extract_pdf_file(self, file_path: str) -> str:
-        """Extract text content from a PDF file using PyMuPDF."""
-        # Use PyMuPDF for text extraction
-        text = self.extract_pdf_text_pymupdf(file_path)
-        if text and len(text.strip()) > 100:  # Check if we got substantial content
-            return text
-    
-        print(f"Failed to extract meaningful text from {file_path}")
-        return ""
-
-    def create_chunks(self, text: str, source_filename: str) -> List[Document]:
-        """Create document chunks from text."""
+    def create_chunks(self, text: str, source_filename: str, chunk_size: int = 1000) -> List[Document]:
         if not text.strip():
             return []
         
-        # Clean up text
-        text = re.sub(r'\n\s*\n\s*\n+', '\n\n', text)
-        text = re.sub(r'\s+', ' ', text)
-
-        splitter = RecursiveCharacterTextSplitter(
-            chunk_size=self.chunk_size,
-            chunk_overlap=self.chunk_overlap,
-            separators=["\n\nARTICLE ", "\n\nSECTION ", "\n\nSec. ", "\n\n", "\n", ". ", " "],
-            length_function=len,
-            is_separator_regex=False
-        )
+        # Simple chunking by sentences
+        sentences = re.split(r'(?<=[.!?])\s+', text)
+        chunks = []
+        current_chunk = ""
         
-        raw_docs = splitter.create_documents([text])
-        return [
-            Document(
-                page_content=doc.page_content.strip(),
-                metadata={"source_file": source_filename, "chunk_id": i}
-            )
-            for i, doc in enumerate(raw_docs)
-        ]
+        for sentence in sentences:
+            if len(current_chunk + sentence) < chunk_size:
+                current_chunk += sentence + " "
+            else:
+                if current_chunk:
+                    chunks.append(Document(
+                        page_content=current_chunk.strip(),
+                        metadata={"source_file": source_filename, "chunk_id": len(chunks)}
+                    ))
+                current_chunk = sentence + " "
+        
+        # Add last chunk
+        if current_chunk:
+            chunks.append(Document(
+                page_content=current_chunk.strip(),
+                metadata={"source_file": source_filename, "chunk_id": len(chunks)}
+            ))
+        
+        return chunks
 
     def get_available_hoas(self) -> List[str]:
-        """Get list of available HOA folders."""
         hoa_folders = []
-        if self.hoa_base_dir.exists():
-            for hoa_name in sorted(os.listdir(self.hoa_base_dir)):
-                hoa_path = self.hoa_base_dir / hoa_name
-                if hoa_path.is_dir():
-                    # Check if there are any PDF files in the directory
-                    has_pdf_files = bool(list(glob.glob(str(hoa_path / "**" / "*.pdf"), recursive=True)))
-                    if has_pdf_files:
-                        hoa_folders.append(hoa_name)
+        if not self.hoa_base_dir.exists():
+            return hoa_folders
+            
+        for hoa_name in sorted(os.listdir(self.hoa_base_dir)):
+            hoa_path = self.hoa_base_dir / hoa_name
+            if hoa_path.is_dir():
+                has_pdf_files = bool(list(glob.glob(str(hoa_path / "**" / "*.pdf"), recursive=True)))
+                if has_pdf_files:
+                    hoa_folders.append(hoa_name)
         return hoa_folders
 
-    def load_single_hoa(self, hoa_name: str) -> dict:
-        """Load a single HOA's PDF documents into vector store."""
-        if hoa_name in self.vector_stores:
-            return {
-                "success": True,
-                "message": f"HOA '{hoa_name}' is already loaded.",
-                "hoa_name": hoa_name,
-                "document_count": 0,
-                "chunk_count": 0
-            }
+    def load_hoa(self, hoa_name: str) -> dict:
+        if hoa_name in self.hoa_documents:
+            return {"success": True, "message": f"HOA '{hoa_name}' already loaded."}
         
         hoa_path = self.hoa_base_dir / hoa_name
         if not hoa_path.is_dir():
-            return {
-                "success": False,
-                "message": f"HOA folder '{hoa_name}' not found.",
-                "hoa_name": hoa_name,
-                "document_count": 0,
-                "chunk_count": 0
-            }
+            return {"success": False, "message": f"HOA folder '{hoa_name}' not found."}
 
-        # Find all PDF files
-        pdf_files = []
-        for pdf_path in glob.glob(str(hoa_path / "**" / "*.pdf"), recursive=True):
-            print(f"Processing PDF: {pdf_path}")
-            pdf_content = self.extract_pdf_file(pdf_path)
-            if pdf_content:
-                pdf_files.append({
-                    "filename": os.path.basename(pdf_path), 
-                    "text": pdf_content
-                })
-            else:
-                print(f"Warning: Could not extract text from {pdf_path}")
+        # Load embedding model
+        if self.embedding_model is None:
+            self.embedding_model = self.get_embedding_model()
 
-        if not pdf_files:
-            return {
-                "success": False,
-                "message": f"No readable PDF files found for HOA: {hoa_name}",
-                "hoa_name": hoa_name,
-                "document_count": 0,
-                "chunk_count": 0
-            }
-
-        # Create chunks from all PDF files
+        # Process PDFs
         all_documents = []
-        for pdf_file in pdf_files:
-            chunks = self.create_chunks(pdf_file["text"], pdf_file["filename"])
-            all_documents.extend(chunks)
-            print(f"Created {len(chunks)} chunks from {pdf_file['filename']}")
-
-        # Create vector store directory
-        hoa_db_dir = self.vectorstore_base_dir / f"hoa_chroma_db_{hoa_name.lower().replace(' ', '_')}"
+        pdf_files = list(glob.glob(str(hoa_path / "**" / "*.pdf"), recursive=True))
         
-        # Use in-memory ChromaDB (no SQLite dependency)
-        try:
-            vs = Chroma.from_documents(
-                documents=all_documents,
-                embedding=self.embedding_model,
-                collection_metadata={"hnsw:space": "cosine"}
-            )
-            self.vector_stores[hoa_name] = vs
-            print(f"Loaded HOA: {hoa_name} | PDFs: {len(pdf_files)} | Chunks: {len(all_documents)}")
+        progress_bar = st.progress(0)
+        for i, pdf_path in enumerate(pdf_files):
+            progress_bar.progress((i + 1) / len(pdf_files))
+            st.write(f"Processing: {os.path.basename(pdf_path)}")
             
-            return {
-                "success": True,
-                "message": f"Successfully loaded HOA: {hoa_name}",
-                "hoa_name": hoa_name,
-                "document_count": len(pdf_files),
-                "chunk_count": len(all_documents)
-            }
-        except Exception as e:
-            return {
-                "success": False,
-                "message": f"Error loading HOA '{hoa_name}': {str(e)}",
-                "hoa_name": hoa_name,
-                "document_count": 0,
-                "chunk_count": 0
-            }
+            pdf_content = self.extract_pdf_text(pdf_path)
+            if pdf_content:
+                chunks = self.create_chunks(pdf_content, os.path.basename(pdf_path))
+                all_documents.extend(chunks)
 
-    def unload_hoa(self, hoa_name: str) -> dict:
-        """Unload an HOA from memory."""
-        if hoa_name in self.vector_stores:
-            del self.vector_stores[hoa_name]
-            return {"success": True, "message": f"HOA '{hoa_name}' unloaded successfully."}
-        else:
-            return {"success": False, "message": f"HOA '{hoa_name}' was not loaded."}
+        if not all_documents:
+            return {"success": False, "message": f"No readable PDF files found for HOA: {hoa_name}"}
 
-    def retrieve_and_answer(self, question: str, hoa_name: str, k: int) -> dict:
-        """Retrieve relevant documents and generate an answer."""
-        if hoa_name not in self.vector_stores:
-            return {
-                "answer": "", 
-                "sources": [], 
-                "error": f"HOA '{hoa_name}' not loaded. Please load it first using the 'Load HOA' button."
-            }
+        # Create embeddings
+        st.write("Creating embeddings...")
+        texts = [doc.page_content for doc in all_documents]
+        embeddings = self.embedding_model.encode(texts)
+        
+        # Store
+        self.hoa_documents[hoa_name] = all_documents
+        self.hoa_embeddings[hoa_name] = embeddings
+        
+        return {
+            "success": True,
+            "message": f"Successfully loaded HOA: {hoa_name}",
+            "document_count": len(pdf_files),
+            "chunk_count": len(all_documents)
+        }
 
-        vector_store = self.vector_stores[hoa_name]
-        results_with_scores = vector_store.similarity_search_with_score(question, k=k)
-        retrieved_chunks = [doc for doc, _ in results_with_scores]
+    def query_hoa(self, question: str, hoa_name: str, k: int = 3) -> dict:
+        if hoa_name not in self.hoa_documents:
+            return {"error": f"HOA '{hoa_name}' not loaded. Please load it first."}
 
-        if not retrieved_chunks:
-            return {"answer": "No relevant information found.", "sources": [], "error": None}
-
-        context = "\n\n".join(
+        # Get question embedding
+        question_embedding = self.embedding_model.encode([question])
+        
+        # Calculate similarities
+        similarities = cosine_similarity(question_embedding, self.hoa_embeddings[hoa_name])[0]
+        
+        # Get top k results
+        top_indices = np.argsort(similarities)[-k:][::-1]
+        retrieved_chunks = [self.hoa_documents[hoa_name][i] for i in top_indices]
+        
+        # Create context
+        context = "\n\n".join([
             f"[Document: {doc.metadata.get('source_file')}]\n{doc.page_content}"
             for doc in retrieved_chunks
-        )
+        ])
         sources = list(set(doc.metadata.get('source_file', 'Unknown') for doc in retrieved_chunks))
 
-        prompt = f"""
-You are a compliance analyst reviewing HOA governing documents. 
+        # Generate answer
+        prompt = f"""You are a compliance analyst reviewing HOA governing documents.
 
 QUESTION:
 {question}
@@ -352,229 +171,75 @@ DOCUMENTS:
 {context}
 
 RESPONSE GUIDELINES:
-- Use only the provided documents. 
-- Keep responses concise and factual and do not infer or guess.
-- Always cite specific section references when available (e.g., "Section 7.4(b)", "Article III", "Section 2.1").
-
-ANSWER:
-"""
+- Use only the provided documents
+- Keep responses concise and factual
+- Always cite specific section references when available (e.g., "Section 7.4(b)", "Article III", "Section 2.1")
+ANSWER:"""
 
         try:
             completion = self.client.chat.completions.create(
-                model="gpt-4o",
+                model="gpt-4o-mini",  # Cheaper model
                 messages=[{"role": "user", "content": prompt}],
                 temperature=0.0,
-                max_tokens=1024,
-                top_p=1
+                max_tokens=1024
             )
             answer = completion.choices[0].message.content
-            return {"answer": answer, "sources": sources, "error": None}
+            return {"answer": answer, "sources": sources}
         except Exception as e:
-            return {"answer": "", "sources": sources, "error": str(e)}
+            return {"error": str(e)}
 
-    def initialize_system(self):
-        """Initialize the embedding model and system."""
-        if self.embedding_model is None:
-            self.embedding_model = self.setup_embedding_model()
-            print("HOA Q&A System started. Embedding model loaded.")
-            print(f"HOA Base Directory: {self.hoa_base_dir}")
-            print(f"Available HOAs: {len(self.get_available_hoas())}")
-        return True
+# Initialize system
+@st.cache_resource
+def get_hoa_system():
+    return SimpleHOASystem()
 
-    def get_health_status(self) -> dict:
-        """Get system health status."""
-        return {
-            "status": "healthy",
-            "available_hoas": self.get_available_hoas(),
-            "loaded_hoas": list(self.vector_stores.keys()),
-            "embedding_model_loaded": self.embedding_model is not None,
-            "base_dir": str(self.hoa_base_dir)
-        }
-
-
-# --------------------
-# Streamlit App
-# --------------------
-
+# Streamlit UI
 def main():
-    st.set_page_config(
-        page_title="HOA Document Q&A",
-        page_icon="🏠",
-        layout="wide"
-    )
+    st.set_page_config(page_title="HOA Document Q&A", layout="wide")
     
-    # Custom CSS for larger but reasonable text size
-    st.markdown("""
-    <style>
-    .main .block-container {
-        font-size: 1.2em;
-    }
-    .stSelectbox > div > div {
-        font-size: 1.2em;
-    }
-    .stSelectbox select {
-        font-size: 1.2em !important;
-        height: auto !important;
-        padding: 0.3em !important;
-    }
-    .stTextArea > div > div > textarea {
-        font-size: 1.2em;
-    }
-    .stButton > button {
-        font-size: 1.2em;
-        height: auto;
-        padding: 0.3em 0.6em;
-    }
-    .stMarkdown {
-        font-size: 1.2em;
-    }
-    h1 {
-        font-size: 1.8em !important;
-    }
-    h2, h3 {
-        font-size: 1.4em !important;
-    }
-    .stInfo, .stSuccess, .stError, .stWarning {
-        font-size: 1.2em;
-    }
-    </style>
-    """, unsafe_allow_html=True)
-
-    # Logo at the very top
-    logo_path = Path(__file__).parent / "logo.jpg"
-    if logo_path.exists():
-        st.image(str(logo_path), width=750)
-
-    # Initialize session state
-    if 'hoa_system' not in st.session_state:
-        try:
-            st.session_state.hoa_system = HOAQASystem()
-            st.session_state.system_initialized = False
-            st.session_state.current_hoa = None
-            st.session_state.chat_history = []
-        except Exception as e:
-            st.error(f"Error initializing system: {str(e)}")
-            st.stop()
-
-    # Initialize system if not done
-    if not st.session_state.system_initialized:
-        with st.spinner("🚀 Initializing HOA Q&A System..."):
-            try:
-                st.session_state.hoa_system.initialize_system()
-                st.session_state.system_initialized = True
-                st.success("✅ System initialized successfully!")
-            except Exception as e:
-                st.error(f"Failed to initialize system: {str(e)}")
-                st.stop()
-
-    # Title and description
     st.title("🏠 HOA Document Q&A System")
-    st.markdown("<p style='font-size: 1em;'>Select an HOA and ask questions about their governing documents.</p>", unsafe_allow_html=True)
+    st.markdown("Ask questions about HOA governing documents")
 
-    # Load available HOA directories
-    available_hoas = st.session_state.hoa_system.get_available_hoas()
+    hoa_system = get_hoa_system()
+    available_hoas = hoa_system.get_available_hoas()
+
     if not available_hoas:
-        st.info("No HOA directories found. Please upload your HOA documents to get started.")
-        st.markdown("""
-        **To use this system:**
-        1. Create folders for each HOA in the data directory
-        2. Place PDF documents in each HOA folder
-        3. Refresh the page to see available HOAs
-        """)
+        st.error("No HOA documents found in the data directory")
         return
 
-    # HOA selection dropdown
-    selected_hoa = st.selectbox(
-        "Select HOA:",
-        options=[""] + available_hoas,
-        index=0 if not st.session_state.current_hoa else available_hoas.index(st.session_state.current_hoa) + 1,
-        help="Choose which HOA's documents you want to query"
-    )
+    # Sidebar
+    st.sidebar.header("Available HOAs")
+    selected_hoa = st.sidebar.selectbox("Select an HOA:", available_hoas)
 
-    if not selected_hoa:
-        st.info("Please select an HOA to begin.")
-        return
-
-    # Initialize RAG system if HOA selection changed
-    if selected_hoa != st.session_state.current_hoa:
-        st.session_state.current_hoa = selected_hoa
-        st.session_state.chat_history = []
-
+    if st.sidebar.button("Load HOA Documents"):
         with st.spinner(f"Loading {selected_hoa} documents..."):
-            result = st.session_state.hoa_system.load_single_hoa(selected_hoa)
+            result = hoa_system.load_hoa(selected_hoa)
             if result["success"]:
-                st.success(f"✅ {selected_hoa} documents loaded successfully!")
+                st.sidebar.success(result["message"])
             else:
-                st.error(f"❌ Failed to load {selected_hoa} documents: {result['message']}")
-                return
+                st.sidebar.error(result["message"])
 
-    # Display current HOA context
-    st.info(f"📁 Currently querying: **{selected_hoa}**")
-
-    # Display current question and answer
-    if st.session_state.chat_history:
-        # Show only the most recent Q&A
-        q, a, sources = st.session_state.chat_history[-1]
-        st.subheader("💬 Current Question & Answer")
-        with st.container():
-            st.markdown(f"**Question:** {q}")
-            st.markdown(f"**Answer:** {a}")
-            if sources:
-                st.markdown(f"**Sources:** {', '.join(sources)}")
-            st.divider()
-
-    # Question input
-    st.subheader("❓ Ask a Question")
-    question = st.text_area(
-        "Enter your question:",
-        placeholder="e.g., What is the term of office for directors?",
-        height=100,
-        key="question_input"
-    )
-
-    # Action buttons
-    col1, col2, col3 = st.columns([1, 1, 3])
-    with col1:
-        if st.button("🔍 Ask Question", type="primary", disabled=not question.strip()):
-            with st.spinner("🤔 Analyzing documents..."):
-                result = st.session_state.hoa_system.retrieve_and_answer(question, selected_hoa, 2)
-                if result["error"]:
-                    st.error(f"❌ Error: {result['error']}")
-                elif result["answer"]:
-                    st.session_state.chat_history.append((question, result["answer"], result["sources"]))
-                    st.rerun()
+    # Main interface
+    if selected_hoa in hoa_system.hoa_documents:
+        st.success(f"✅ {selected_hoa} documents loaded")
+        
+        question = st.text_input("Ask a question about the HOA documents:")
+        
+        if st.button("Ask Question") and question:
+            with st.spinner("Searching documents..."):
+                result = hoa_system.query_hoa(question, selected_hoa)
+                
+                if "error" in result:
+                    st.error(f"Error: {result['error']}")
                 else:
-                    st.warning("⚠️ No answer could be generated.")
-
-    with col2:
-        if st.button("🗑️ Clear History"):
-            st.session_state.chat_history = []
-            st.rerun()
-
-    # Example questions
-    st.subheader("💡 Example Questions")
-    examples = [
-        "Number of Directors?",
-        "Term of Office?",
-        "Candidate Qualifications/Eligibility Requirements?",
-        "Are write-ins allowed?",
-        "Is there a process for handling tie votes?"
-    ]
-    
-    for example in examples:
-        if st.button(f"📝 {example}", key=f"example_{example}"):
-            # Set the question and trigger processing directly
-            with st.spinner("🤔 Analyzing documents..."):
-                result = st.session_state.hoa_system.retrieve_and_answer(example, selected_hoa, 2)
-                if result["error"]:
-                    st.error(f"❌ Error: {result['error']}")
-                elif result["answer"]:
-                    st.session_state.chat_history = [(example, result["answer"], result["sources"])]
-                    st.rerun()
-                else:
-                    st.warning("⚠️ No answer could be generated.")
-
+                    st.markdown("### Answer:")
+                    st.write(result["answer"])
+                    
+                    st.markdown("### Sources:")
+                    for source in result["sources"]:
+                        st.write(f"• {source}")
+    else:
+        st.info(f"Please load {selected_hoa} documents first using the sidebar.")
 
 if __name__ == "__main__":
     main()
-
