@@ -19,10 +19,7 @@ from langchain.text_splitter import RecursiveCharacterTextSplitter
 
 # PDF processing imports
 import pdfplumber
-import gdown
-import requests
-from urllib.parse import urlparse
-import zipfile
+# Removed Google Drive dependencies - documents now in git repo
 
 
 # --------------------
@@ -74,8 +71,7 @@ class HOAQASystem:
         if not self.openai_api_key:
             raise ValueError("OPENAI_API_KEY not found in Streamlit secrets or environment variables")
         
-        # Google Drive folder ID for HOA documents
-        self.google_drive_folder_id = "1m8Kaak_kN5ewMxWMUJqByq06QJPl_5Ql"
+        # Documents are now stored locally in the git repo
         
         # For deployment, use a default data directory or allow environment override
         try:
@@ -94,8 +90,7 @@ class HOAQASystem:
             self.hoa_base_dir = Path(__file__).parent / "data" / "hoa_documents"
             self.hoa_base_dir.mkdir(parents=True, exist_ok=True)
         
-        # Download documents from Google Drive if directory is empty
-        self.ensure_documents_downloaded()
+        # Documents are stored in git repo - no download needed
 
     def setup_directories(self):
         """Setup required directories."""
@@ -115,11 +110,16 @@ class HOAQASystem:
             encode_kwargs={"normalize_embeddings": True, "batch_size": 16}
         )
 
-    def ensure_documents_downloaded(self):
+    def ensure_documents_downloaded_REMOVED(self):
         """Download HOA documents from Google Drive if not present locally."""
         if self.hoa_base_dir.exists() and any(self.hoa_base_dir.iterdir()):
             print("HOA documents found locally, skipping download.")
             return
+        
+        print(f"HOA base directory: {self.hoa_base_dir}")
+        print(f"Directory exists: {self.hoa_base_dir.exists()}")
+        if self.hoa_base_dir.exists():
+            print(f"Directory contents: {list(self.hoa_base_dir.iterdir())}")
         
         print("Downloading HOA documents from Google Drive...")
         try:
