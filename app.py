@@ -18,7 +18,7 @@ from langchain.schema import Document
 from langchain.text_splitter import RecursiveCharacterTextSplitter
 
 # PDF processing imports
-import fitz  # PyMuPDF
+import pdfplumber
 import gdown
 import requests
 from urllib.parse import urlparse
@@ -150,24 +150,24 @@ class HOAQASystem:
             print(f"Error downloading HOA documents: {e}")
             # Continue without documents - app will show appropriate message
 
-    def extract_pdf_text_pymupdf(self, file_path: str) -> str:
-        """Extract text from PDF using PyMuPDF (fitz)."""
+    def extract_pdf_text_pdfplumber(self, file_path: str) -> str:
+        """Extract text from PDF using pdfplumber."""
         try:
             text = ""
-            doc = fitz.open(file_path)
-            for page_num in range(doc.page_count):
-                page = doc[page_num]
-                text += page.get_text() + "\n"
-            doc.close()
+            with pdfplumber.open(file_path) as pdf:
+                for page in pdf.pages:
+                    page_text = page.extract_text()
+                    if page_text:
+                        text += page_text + "\n"
             return text.strip()
         except Exception as e:
-            print(f"PyMuPDF failed for {file_path}: {e}")
+            print(f"pdfplumber failed for {file_path}: {e}")
             return ""
 
     def extract_pdf_file(self, file_path: str) -> str:
-        """Extract text content from a PDF file using multiple methods."""
-        # Try PyMuPDF first (usually most reliable)
-        text = self.extract_pdf_text_pymupdf(file_path)
+        """Extract text content from a PDF file using pdfplumber."""
+        # Use pdfplumber for text extraction
+        text = self.extract_pdf_text_pdfplumber(file_path)
         if text and len(text.strip()) > 100:  # Check if we got substantial content
             return text
     
