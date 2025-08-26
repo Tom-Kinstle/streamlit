@@ -1,0 +1,15 @@
+services:
+  - type: web
+    name: hoa-qa-system
+    env: python
+    buildCommand: pip install -r requirements.txt
+    startCommand: streamlit run app.py --server.port $PORT --server.address 0.0.0.0
+    plan: free
+    healthCheckPath: /_stcore/health
+    envVars:
+      - key: OPENAI_API_KEY
+        sync: false
+    disk:
+      name: hoa-data
+      mountPath: /opt/render/project/src/vectorstores
+      sizeGB: 1
