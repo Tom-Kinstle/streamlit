@@ -58,15 +58,35 @@ class HOAQASystem:
         """Load and validate environment variables."""
         load_dotenv()
         
-        self.openai_api_key = os.getenv("OPENAI_API_KEY")
+        # Try Streamlit secrets first, then environment variables  
+        self.openai_api_key = None
+        try:
+            # Import should be at module level, but try here if needed
+            self.openai_api_key = st.secrets.get("OPENAI_API_KEY")
+        except Exception as e:
+            print(f"Streamlit secrets error: {e}")
+            pass
+            
+        # Fallback to environment variable
         if not self.openai_api_key:
-            raise ValueError("OPENAI_API_KEY environment variable is required")
+            self.openai_api_key = os.getenv("OPENAI_API_KEY")
+            
+        if not self.openai_api_key:
+            raise ValueError("OPENAI_API_KEY not found in Streamlit secrets or environment variables")
         
         # Google Drive folder ID for HOA documents
         self.google_drive_folder_id = "1m8Kaak_kN5ewMxWMUJqByq06QJPl_5Ql"
         
         # For deployment, use a default data directory or allow environment override
-        hoa_base_dir_env = os.getenv("HOA_BASE_DIR")
+        try:
+            import streamlit as st
+            hoa_base_dir_env = st.secrets.get("HOA_BASE_DIR")
+        except:
+            hoa_base_dir_env = None
+            
+        if not hoa_base_dir_env:
+            hoa_base_dir_env = os.getenv("HOA_BASE_DIR")
+            
         if hoa_base_dir_env:
             self.hoa_base_dir = Path(hoa_base_dir_env).resolve()
         else:
