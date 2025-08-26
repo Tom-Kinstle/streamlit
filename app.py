@@ -87,7 +87,7 @@ class HOAQASystem:
             self.hoa_base_dir = Path(hoa_base_dir_env).resolve()
         else:
             # Default to a data directory in the app folder
-            self.hoa_base_dir = Path(__file__).parent / "data" / "hoa_documents"
+            self.hoa_base_dir = Path(__file__).parent / "data"
             self.hoa_base_dir.mkdir(parents=True, exist_ok=True)
         
         # Documents are stored in git repo - no download needed
@@ -366,7 +366,6 @@ class HOAQASystem:
 
         prompt = f"""
 You are a compliance analyst reviewing HOA governing documents. 
-Answer the question strictly using the provided documents.
 
 QUESTION:
 {question}
@@ -375,7 +374,9 @@ DOCUMENTS:
 {context}
 
 RESPONSE GUIDELINES:
-- Use only the provided documents. Keep responses concise and factual and do not infer or guess.
+- Use only the provided documents. 
+- Keep responses concise and factual and do not infer or guess.
+- Always cite specific section references when available (e.g., "Section 7.4(b)", "Article III", "Section 2.1").
 
 ANSWER:
 """
