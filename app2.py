@@ -252,30 +252,31 @@ class HOAQASystem:
         
         # Use ChromaDB for better retrieval performance
         try:
-            vs = Chroma.from_documents(
-                documents=all_documents,
-                embedding=self.embedding_model,
-                persist_directory=str(hoa_db_dir),
-                collection_metadata={"hnsw:space": "cosine"}
-            )
-            self.vector_stores[hoa_name] = vs
-            print(f"Loaded HOA: {hoa_name} | PDFs: {len(pdf_files)} | Chunks: {len(all_documents)}")
-            
-            return {
-                "success": True,
-                "message": f"Successfully loaded HOA: {hoa_name}",
-                "hoa_name": hoa_name,
-                "document_count": len(pdf_files),
-                "chunk_count": len(all_documents)
-            }
+                vs = Chroma.from_documents(
+                        documents=all_documents,
+                        embedding=self.embedding_model,
+                        persist_directory=str(hoa_db_dir),
+                        collection_metadata={"hnsw:space": "cosine"}
+                )
+                self.vector_stores[hoa_name] = vs
+                print(f"Loaded HOA: {hoa_name} | PDFs: {len(pdf_files)} | Chunks: {len(all_documents)}")
+
+                return {
+                        "success": True,
+                        "message": f"Successfully loaded HOA: {hoa_name}",
+                        "hoa_name": hoa_name,
+                        "document_count": len(pdf_files),
+                        "chunk_count": len(all_documents)
+                }
         except Exception as e:
-            return {
-                "success": False,
-                "message": f"Error loading HOA '{hoa_name}': {str(e)}",
-                "hoa_name": hoa_name,
-                "document_count": 0,
-                "chunk_count": 0
-            }
+                return {
+                        "success": False,
+                        "message": f"Error loading HOA '{hoa_name}': {str(e)}",
+                        "hoa_name": hoa_name,
+                        "document_count": 0,
+                        "chunk_count": 0
+                }
+
 
     def unload_hoa(self, hoa_name: str) -> dict:
         """Unload an HOA from memory."""
@@ -449,13 +450,14 @@ def main():
     if logo_path.exists():
         st.image(str(logo_path), width=750)
 
-    # Initialize session state
+    # Initialize session state with caching for better Streamlit Cloud performance
     if 'hoa_system' not in st.session_state:
         try:
             st.session_state.hoa_system = HOAQASystem()
             st.session_state.system_initialized = False
             st.session_state.current_hoa = None
             st.session_state.chat_history = []
+            st.session_state.loaded_hoas = set()  # Track loaded HOAs to avoid reloading
         except Exception as e:
             st.error(f"Error initializing system: {str(e)}")
             st.stop()
@@ -504,13 +506,18 @@ def main():
         st.session_state.current_hoa = selected_hoa
         st.session_state.chat_history = []
 
-        with st.spinner(f"Loading {selected_hoa} documents..."):
-            result = st.session_state.hoa_system.load_single_hoa(selected_hoa)
-            if result["success"]:
-                st.success(f"✅ {selected_hoa} documents loaded successfully!")
-            else:
-                st.error(f"❌ Failed to load {selected_hoa} documents: {result['message']}")
-                return
+        # Only load if not already loaded (Streamlit Cloud optimization)
+        if selected_hoa not in st.session_state.loaded_hoas:
+            with st.spinner(f"Loading {selected_hoa} documents..."):
+                result = st.session_state.hoa_system.load_single_hoa(selected_hoa)
+                if result["success"]:
+                    st.session_state.loaded_hoas.add(selected_hoa)
+                    st.success(f"✅ {selected_hoa} documents loaded successfully!")
+                else:
+                    st.error(f"❌ Failed to load {selected_hoa} documents: {result['message']}")
+                    return
+        else:
+            st.info(f"📁 {selected_hoa} documents already loaded from cache")
 
     # Display current HOA context
     st.info(f"📁 Currently querying: **{selected_hoa}**")
