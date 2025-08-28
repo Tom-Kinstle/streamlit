@@ -21,6 +21,7 @@ try:
     from dotenv import load_dotenv
 except ImportError:
     load_dotenv = None
+
 from langchain.text_splitter import RecursiveCharacterTextSplitter
 from langchain.schema import Document
 try:
@@ -28,6 +29,7 @@ try:
 except ImportError:
     from langchain_community.embeddings import HuggingFaceEmbeddings
 from langchain_community.vectorstores import Chroma
+
 import torch
 
 # --------------------
