@@ -8,5 +8,6 @@ langchain
 langchain-community
 langchain-huggingface
 python-dotenv
-chromadb==0.4.15
+chromadb
 torch
+pysqlite3-binary

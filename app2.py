@@ -1,3 +1,8 @@
+# Fix SQLite version for Streamlit Cloud deployment
+__import__('pysqlite3')
+import sys
+sys.modules['sqlite3'] = sys.modules.pop('pysqlite3')
+
 # HOA Document Q&A System - Updated Version with Mode Selection
 
 import os
@@ -245,12 +250,13 @@ class HOAQASystem:
         if hoa_db_dir.exists():
             shutil.rmtree(hoa_db_dir)
         
-        # Use persisted ChromaDB for better performance
+        # Use ChromaDB for better retrieval performance
         try:
             vs = Chroma.from_documents(
                 documents=all_documents,
                 embedding=self.embedding_model,
-                persist_directory=str(hoa_db_dir)
+                persist_directory=str(hoa_db_dir),
+                collection_metadata={"hnsw:space": "cosine"}
             )
             self.vector_stores[hoa_name] = vs
             print(f"Loaded HOA: {hoa_name} | PDFs: {len(pdf_files)} | Chunks: {len(all_documents)}")
