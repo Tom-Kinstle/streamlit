@@ -32,6 +32,10 @@ from langchain_community.vectorstores import Chroma
 
 import torch
 
+# Disable ChromaDB SQLite version check
+os.environ["ALLOW_RESET"] = "TRUE"
+os.environ["CHROMA_SERVER_HOST"] = "localhost"
+
 # --------------------
 # Data models
 # --------------------
@@ -246,8 +250,7 @@ class HOAQASystem:
             vs = Chroma.from_documents(
                 documents=all_documents,
                 embedding=self.embedding_model,
-                persist_directory=str(hoa_db_dir),
-                collection_metadata={"hnsw:space": "cosine"}
+                persist_directory=str(hoa_db_dir)
             )
             self.vector_stores[hoa_name] = vs
             print(f"Loaded HOA: {hoa_name} | PDFs: {len(pdf_files)} | Chunks: {len(all_documents)}")
