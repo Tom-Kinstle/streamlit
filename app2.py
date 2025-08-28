@@ -17,7 +17,10 @@ import numpy as np
 import fitz  # PyMuPDF
 
 # Additional imports for RAG functionality
-from dotenv import load_dotenv
+try:
+    from dotenv import load_dotenv
+except ImportError:
+    load_dotenv = None
 from langchain.text_splitter import RecursiveCharacterTextSplitter
 from langchain.schema import Document
 try:
@@ -60,7 +63,8 @@ class HOAQASystem:
 
     def load_environment(self):
         """Load and validate environment variables."""
-        load_dotenv()
+        if load_dotenv is not None:
+            load_dotenv()
         
         # Try Streamlit secrets first, then environment variables  
         self.openai_api_key = None
