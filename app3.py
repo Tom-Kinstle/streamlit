@@ -31,8 +31,6 @@ try:
     import io
     OCR_AVAILABLE = True
 except ImportError as e:
-    st.warning(f"⚠️ OCR libraries not available: {e}")
-    st.info("Install pytesseract, opencv-python, and Pillow for image processing capabilities")
     OCR_AVAILABLE = False
 
 # Additional imports for RAG functionality
@@ -129,7 +127,7 @@ class HOAQASystemWithImages:
     def setup_directories(self):
         """Setup required directories."""
         self.vectorstore_base_dir = Path(__file__).parent / "vectorstores"
-        self.vectorstore_base_dir.mkdir(exist_ok=True)
+        self.vectorstore_base_dir.mkdir(exist_ok=True, mode=0o755)
 
     def initialize_openai_client(self):
         """Initialize the OpenAI client."""
@@ -152,7 +150,6 @@ class HOAQASystemWithImages:
             pytesseract.get_tesseract_version()
             return True
         except Exception:
-            st.warning("⚠️ Tesseract OCR not properly configured. Image text extraction will be skipped.")
             return False
 
     def extract_images_from_pdf(self, pdf_path: str) -> List[tuple]:
@@ -177,7 +174,6 @@ class HOAQASystemWithImages:
             doc.close()
             return images
         except Exception as e:
-            st.warning(f"⚠️ Error extracting images from {pdf_path}: {e}")
             return []
 
     def extract_text_from_image_ocr(self, image_data: bytes) -> str:
@@ -211,7 +207,6 @@ class HOAQASystemWithImages:
             
             return text.strip()
         except Exception as e:
-            st.warning(f"⚠️ OCR processing error: {e}")
             return ""
 
     def extract_pdf_text_with_images(self, file_path: str) -> str:
@@ -239,7 +234,6 @@ class HOAQASystemWithImages:
             doc.close()
             return text.strip()
         except Exception as e:
-            st.error(f"❌ Error processing PDF {file_path}: {e}")
             return ""
 
     def extract_pdf_file(self, file_path: str) -> str:
@@ -249,7 +243,6 @@ class HOAQASystemWithImages:
         if text and len(text.strip()) > 100:  # Check if we got substantial content
             return text
     
-        st.warning(f"⚠️ Failed to extract meaningful text from {file_path}")
         return ""
 
     def create_chunks(self, text: str, source_filename: str) -> List[Document]:
@@ -315,7 +308,7 @@ class HOAQASystemWithImages:
         # Find all PDF files
         pdf_files = []
         for pdf_path in glob.glob(str(hoa_path / "**" / "*.pdf"), recursive=True):
-            st.info(f"📄 Processing PDF with image extraction: {os.path.basename(pdf_path)}")
+            pass  # Processing silently
             pdf_content = self.extract_pdf_file(pdf_path)
             if pdf_content:
                 pdf_files.append({
@@ -323,7 +316,7 @@ class HOAQASystemWithImages:
                     "text": pdf_content
                 })
             else:
-                st.warning(f"⚠️ Could not extract text from {pdf_path}")
+                pass  # Skip silently
 
         if not pdf_files:
             return {
@@ -339,12 +332,20 @@ class HOAQASystemWithImages:
         for pdf_file in pdf_files:
             chunks = self.create_chunks(pdf_file["text"], pdf_file["filename"])
             all_documents.extend(chunks)
-            st.info(f"📝 Created {len(chunks)} chunks from {pdf_file['filename']}")
+            pass  # Processing silently
 
         # Create vector store directory
         hoa_db_dir = self.vectorstore_base_dir / f"hoa_chroma_db_{hoa_name.lower().replace(' ', '_')}"
         if hoa_db_dir.exists():
-            shutil.rmtree(hoa_db_dir)
+            # Ensure we can delete readonly files
+            import stat
+            def handle_remove_readonly(func, path, exc):
+                if exc[1].errno == 13:  # Permission denied
+                    os.chmod(path, stat.S_IWRITE)
+                    func(path)
+                else:
+                    raise
+            shutil.rmtree(hoa_db_dir, onerror=handle_remove_readonly)
         
         # Use ChromaDB for better retrieval performance
         try:
@@ -355,7 +356,7 @@ class HOAQASystemWithImages:
                 collection_metadata={"hnsw:space": "cosine"}
             )
             self.vector_stores[hoa_name] = vs
-            st.success(f"✅ Loaded HOA: {hoa_name} | PDFs: {len(pdf_files)} | Chunks: {len(all_documents)}")
+            pass  # Loading complete silently
 
             return {
                 "success": True,
@@ -462,9 +463,7 @@ ANSWER:
         """Initialize the embedding model and system."""
         if self.embedding_model is None:
             self.embedding_model = self.setup_embedding_model()
-            st.info("🤖 HOA Q&A System with Image Processing initialized")
-            st.info(f"📁 HOA Base Directory: {self.hoa_base_dir}")
-            st.info(f"📋 Available HOAs: {len(self.get_available_hoas())}")
+            pass  # System initialized silently
         return True
 
     def get_health_status(self) -> dict:
@@ -550,19 +549,14 @@ def main():
             try:
                 st.session_state.hoa_system.initialize_system()
                 st.session_state.system_initialized = True
-                st.success("✅ System with image processing initialized successfully!")
-                if OCR_AVAILABLE:
-                    st.success("🖼️ OCR capabilities enabled for image text extraction")
-                else:
-                    st.warning("⚠️ OCR libraries not available - text-only processing")
+                pass  # System ready
             except Exception as e:
                 st.error(f"❌ Failed to initialize system: {str(e)}")
                 st.stop()
 
     # Title and description
     st.title("🏠 HOA Document Q&A System")
-    st.caption("🖼️ Enhanced with PDF Image Processing & OCR")
-    st.markdown("<p style='font-size: 1em;'>Select an HOA and ask questions about their governing documents. Now with image text extraction capabilities!</p>", unsafe_allow_html=True)
+    st.markdown("<p style='font-size: 1em;'>Select an HOA and ask questions about their governing documents.</p>", unsafe_allow_html=True)
 
     # Load available HOA directories
     available_hoas = st.session_state.hoa_system.get_available_hoas()
@@ -657,19 +651,6 @@ def main():
             st.session_state.chat_history = []
             st.rerun()
 
-    # Display system status in sidebar
-    with st.sidebar:
-        st.subheader("🖼️ Image Processing Status")
-        health = st.session_state.hoa_system.get_health_status()
-        if health["ocr_available"]:
-            st.success("✅ OCR Ready")
-        else:
-            st.warning("⚠️ OCR Not Available")
-        
-        if st.session_state.loaded_hoas:
-            st.subheader("📁 Loaded HOAs:")
-            for hoa in st.session_state.loaded_hoas:
-                st.write(f"✅ {hoa}")
 
 
 if __name__ == "__main__":
