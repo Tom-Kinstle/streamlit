@@ -11,3 +11,6 @@ python-dotenv
 chromadb
 torch
 pysqlite3-binary
+pytesseract
+opencv-python
+Pillow

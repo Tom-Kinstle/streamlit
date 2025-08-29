@@ -1,9 +1,13 @@
 # Fix SQLite version for Streamlit Cloud deployment
-__import__('pysqlite3')
-import sys
-sys.modules['sqlite3'] = sys.modules.pop('pysqlite3')
+try:
+    __import__('pysqlite3')
+    import sys
+    sys.modules['sqlite3'] = sys.modules.pop('pysqlite3')
+except ImportError:
+    # pysqlite3 not available - use system sqlite3
+    pass
 
-# HOA Document Q&A System - Updated Version with Mode Selection
+# HOA Document Q&A System - Enhanced with PDF Image Processing
 
 import os
 import glob
@@ -14,12 +18,22 @@ from typing import List, Dict, Optional, TypedDict
 
 import streamlit as st
 from openai import OpenAI
-from sentence_transformers import SentenceTransformer
-from sklearn.metrics.pairwise import cosine_similarity
 import numpy as np
 
 # PDF processing imports
 import fitz  # PyMuPDF
+
+# OCR imports for image processing
+try:
+    import pytesseract
+    import cv2
+    from PIL import Image
+    import io
+    OCR_AVAILABLE = True
+except ImportError as e:
+    st.warning(f"⚠️ OCR libraries not available: {e}")
+    st.info("Install pytesseract, opencv-python, and Pillow for image processing capabilities")
+    OCR_AVAILABLE = False
 
 # Additional imports for RAG functionality
 try:
@@ -53,20 +67,18 @@ class QueryState(TypedDict):
 
 
 # --------------------
-# Main HOA Q&A System Class
+# Main HOA Q&A System Class with Image Processing
 # --------------------
-class HOAQASystem:
+class HOAQASystemWithImages:
     def __init__(self):
-        """Initialize the HOA Q&A System."""
+        """Initialize the HOA Q&A System with image processing capabilities."""
         self.load_environment()
         self.initialize_openai_client()
         self.setup_directories()
         
-        # Global state - simple vector storage
-        self.hoa_documents: Dict[str, List[Document]] = {}
-        self.hoa_embeddings: Dict[str, np.ndarray] = {}
-        self.embedding_model: Optional[SentenceTransformer] = None
+        # Global state
         self.vector_stores: Dict[str, any] = {}
+        self.embedding_model: Optional[HuggingFaceEmbeddings] = None
         
         # Configuration - Optimized for factual retrieval
         self.chunk_size = 1000
@@ -132,28 +144,112 @@ class HOAQASystem:
             encode_kwargs={"normalize_embeddings": True, "batch_size": 16}
         )
 
-    def extract_pdf_text_pymupdf(self, file_path: str) -> str:
-        """Extract text from PDF using PyMuPDF (fitz)."""
+    def check_ocr_availability(self) -> bool:
+        """Check if OCR capabilities are available."""
+        if not OCR_AVAILABLE:
+            return False
+        try:
+            pytesseract.get_tesseract_version()
+            return True
+        except Exception:
+            st.warning("⚠️ Tesseract OCR not properly configured. Image text extraction will be skipped.")
+            return False
+
+    def extract_images_from_pdf(self, pdf_path: str) -> List[tuple]:
+        """Extract images from PDF pages."""
+        images = []
+        try:
+            doc = fitz.open(pdf_path)
+            for page_num in range(doc.page_count):
+                page = doc[page_num]
+                image_list = page.get_images()
+                
+                for img_index, img in enumerate(image_list):
+                    xref = img[0]
+                    pix = fitz.Pixmap(doc, xref)
+                    
+                    # Convert CMYK to RGB if necessary
+                    if pix.n - pix.alpha < 4:
+                        img_data = pix.tobytes("png")
+                        images.append((page_num + 1, img_index, img_data))
+                    pix = None
+            
+            doc.close()
+            return images
+        except Exception as e:
+            st.warning(f"⚠️ Error extracting images from {pdf_path}: {e}")
+            return []
+
+    def extract_text_from_image_ocr(self, image_data: bytes) -> str:
+        """Extract text from image using OCR."""
+        if not self.check_ocr_availability():
+            return ""
+        
+        try:
+            # Convert bytes to PIL Image
+            image = Image.open(io.BytesIO(image_data))
+            
+            # Convert PIL Image to numpy array for OpenCV
+            img_array = np.array(image)
+            if len(img_array.shape) == 3:
+                img_array = cv2.cvtColor(img_array, cv2.COLOR_RGB2BGR)
+            
+            # Preprocess image for better OCR results
+            gray = cv2.cvtColor(img_array, cv2.COLOR_BGR2GRAY) if len(img_array.shape) == 3 else img_array
+            
+            # Apply threshold to get binary image
+            _, binary = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+            
+            # Denoise
+            denoised = cv2.medianBlur(binary, 3)
+            
+            # Extract text using pytesseract
+            text = pytesseract.image_to_string(
+                denoised, 
+                config='--psm 6 -c tessedit_char_whitelist=0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz .,;:!?()-[]{}"\'/\\'
+            )
+            
+            return text.strip()
+        except Exception as e:
+            st.warning(f"⚠️ OCR processing error: {e}")
+            return ""
+
+    def extract_pdf_text_with_images(self, file_path: str) -> str:
+        """Extract text from PDF including OCR from embedded images."""
         try:
             text = ""
             doc = fitz.open(file_path)
+            
+            # Extract regular text first
             for page_num in range(doc.page_count):
                 page = doc[page_num]
-                text += page.get_text() + "\n"
+                page_text = page.get_text()
+                text += f"\n--- Page {page_num + 1} ---\n" + page_text
+            
+            # Extract and OCR images if available
+            if OCR_AVAILABLE and self.check_ocr_availability():
+                images = self.extract_images_from_pdf(file_path)
+                if images:
+                    text += "\n\n--- EXTRACTED TEXT FROM IMAGES ---\n"
+                    for page_num, img_index, img_data in images:
+                        ocr_text = self.extract_text_from_image_ocr(img_data)
+                        if ocr_text.strip():
+                            text += f"\n[Image {img_index + 1} from page {page_num}]\n{ocr_text}\n"
+            
             doc.close()
             return text.strip()
         except Exception as e:
-            print(f"PyMuPDF failed for {file_path}: {e}")
+            st.error(f"❌ Error processing PDF {file_path}: {e}")
             return ""
 
     def extract_pdf_file(self, file_path: str) -> str:
-        """Extract text content from a PDF file using PyMuPDF."""
-        # Use PyMuPDF for text extraction
-        text = self.extract_pdf_text_pymupdf(file_path)
+        """Extract text content from a PDF file with image processing."""
+        # Use enhanced extraction method with image processing
+        text = self.extract_pdf_text_with_images(file_path)
         if text and len(text.strip()) > 100:  # Check if we got substantial content
             return text
     
-        print(f"Failed to extract meaningful text from {file_path}")
+        st.warning(f"⚠️ Failed to extract meaningful text from {file_path}")
         return ""
 
     def create_chunks(self, text: str, source_filename: str) -> List[Document]:
@@ -219,7 +315,7 @@ class HOAQASystem:
         # Find all PDF files
         pdf_files = []
         for pdf_path in glob.glob(str(hoa_path / "**" / "*.pdf"), recursive=True):
-            print(f"Processing PDF: {pdf_path}")
+            st.info(f"📄 Processing PDF with image extraction: {os.path.basename(pdf_path)}")
             pdf_content = self.extract_pdf_file(pdf_path)
             if pdf_content:
                 pdf_files.append({
@@ -227,7 +323,7 @@ class HOAQASystem:
                     "text": pdf_content
                 })
             else:
-                print(f"Warning: Could not extract text from {pdf_path}")
+                st.warning(f"⚠️ Could not extract text from {pdf_path}")
 
         if not pdf_files:
             return {
@@ -243,7 +339,7 @@ class HOAQASystem:
         for pdf_file in pdf_files:
             chunks = self.create_chunks(pdf_file["text"], pdf_file["filename"])
             all_documents.extend(chunks)
-            print(f"Created {len(chunks)} chunks from {pdf_file['filename']}")
+            st.info(f"📝 Created {len(chunks)} chunks from {pdf_file['filename']}")
 
         # Create vector store directory
         hoa_db_dir = self.vectorstore_base_dir / f"hoa_chroma_db_{hoa_name.lower().replace(' ', '_')}"
@@ -252,29 +348,30 @@ class HOAQASystem:
         
         # Use ChromaDB for better retrieval performance
         try:
-                vs = Chroma.from_documents(
-                        documents=all_documents,
-                        embedding=self.embedding_model,
-                        collection_metadata={"hnsw:space": "cosine"}
-                )
-                self.vector_stores[hoa_name] = vs
-                print(f"Loaded HOA: {hoa_name} | PDFs: {len(pdf_files)} | Chunks: {len(all_documents)}")
+            vs = Chroma.from_documents(
+                documents=all_documents,
+                embedding=self.embedding_model,
+                persist_directory=str(hoa_db_dir),
+                collection_metadata={"hnsw:space": "cosine"}
+            )
+            self.vector_stores[hoa_name] = vs
+            st.success(f"✅ Loaded HOA: {hoa_name} | PDFs: {len(pdf_files)} | Chunks: {len(all_documents)}")
 
-                return {
-                        "success": True,
-                        "message": f"Successfully loaded HOA: {hoa_name}",
-                        "hoa_name": hoa_name,
-                        "document_count": len(pdf_files),
-                        "chunk_count": len(all_documents)
-                }
+            return {
+                "success": True,
+                "message": f"Successfully loaded HOA: {hoa_name}",
+                "hoa_name": hoa_name,
+                "document_count": len(pdf_files),
+                "chunk_count": len(all_documents)
+            }
         except Exception as e:
-                return {
-                        "success": False,
-                        "message": f"Error loading HOA '{hoa_name}': {str(e)}",
-                        "hoa_name": hoa_name,
-                        "document_count": 0,
-                        "chunk_count": 0
-                }
+            return {
+                "success": False,
+                "message": f"Error loading HOA '{hoa_name}': {str(e)}",
+                "hoa_name": hoa_name,
+                "document_count": 0,
+                "chunk_count": 0
+            }
 
 
     def unload_hoa(self, hoa_name: str) -> dict:
@@ -336,29 +433,14 @@ DOCUMENTS:
 
 MODE 2: Detailed Analysis
 
-Expand the answer with:
+Provide a comprehensive explanation that includes:
 
-Supporting details (quote exactly as written for numbers, dates, and percentages)
+- Complete context and background information
+- All relevant details from the documents
+- Specific citations with document names and sections when available
+- Any related information that helps understand the topic fully
 
-Citations (name the document and section/article when possible)
-
-Distinctions between mandatory requirements ("must," "shall") vs. optional procedures ("may," "can")
-
-Discrepancies if documents conflict
-
-Limitations (state if information is missing, unclear, or only appears in the file name)
-
-CRITICAL REQUIREMENTS:
-
-If information is missing or unclear → say: "Not specified in the provided documents."
-
-If query is blank, irrelevant, or not a question → say: "Please provide a question about homeowner association rules, procedures, and requirements."
-
-If user asks for advice (e.g., "should we…," "is this a good idea") → say: "I cannot provide advice."
-
-If a date is only in a file name and not in the text, you may use it only if no other date is given.
-
-Keep responses under 200 words unless the question requires more detail.
+Use only the information provided in the documents. If information is not available in the documents, state that clearly.
 
 ANSWER:
 """
@@ -380,9 +462,9 @@ ANSWER:
         """Initialize the embedding model and system."""
         if self.embedding_model is None:
             self.embedding_model = self.setup_embedding_model()
-            print("HOA Q&A System started. Embedding model loaded.")
-            print(f"HOA Base Directory: {self.hoa_base_dir}")
-            print(f"Available HOAs: {len(self.get_available_hoas())}")
+            st.info("🤖 HOA Q&A System with Image Processing initialized")
+            st.info(f"📁 HOA Base Directory: {self.hoa_base_dir}")
+            st.info(f"📋 Available HOAs: {len(self.get_available_hoas())}")
         return True
 
     def get_health_status(self) -> dict:
@@ -392,7 +474,8 @@ ANSWER:
             "available_hoas": self.get_available_hoas(),
             "loaded_hoas": list(self.vector_stores.keys()),
             "embedding_model_loaded": self.embedding_model is not None,
-            "base_dir": str(self.hoa_base_dir)
+            "base_dir": str(self.hoa_base_dir),
+            "ocr_available": OCR_AVAILABLE and self.check_ocr_availability()
         }
 
 
@@ -402,7 +485,7 @@ ANSWER:
 
 def main():
     st.set_page_config(
-        page_title="HOA Document Q&A",
+        page_title="HOA Document Q&A with Image Processing",
         page_icon="🏠",
         layout="wide"
     )
@@ -449,36 +532,42 @@ def main():
     if logo_path.exists():
         st.image(str(logo_path), width=750)
 
-    # Initialize session state
+    # Initialize session state with caching for better Streamlit Cloud performance
     if 'hoa_system' not in st.session_state:
         try:
-            st.session_state.hoa_system = HOAQASystem()
+            st.session_state.hoa_system = HOAQASystemWithImages()
             st.session_state.system_initialized = False
             st.session_state.current_hoa = None
             st.session_state.chat_history = []
+            st.session_state.loaded_hoas = set()  # Track loaded HOAs to avoid reloading
         except Exception as e:
-            st.error(f"Error initializing system: {str(e)}")
+            st.error(f"❌ Error initializing system: {str(e)}")
             st.stop()
 
     # Initialize system if not done
     if not st.session_state.system_initialized:
-        with st.spinner("🚀 Initializing HOA Q&A System..."):
+        with st.spinner("🚀 Initializing HOA Q&A System with Image Processing..."):
             try:
                 st.session_state.hoa_system.initialize_system()
                 st.session_state.system_initialized = True
-                st.success("✅ System initialized successfully!")
+                st.success("✅ System with image processing initialized successfully!")
+                if OCR_AVAILABLE:
+                    st.success("🖼️ OCR capabilities enabled for image text extraction")
+                else:
+                    st.warning("⚠️ OCR libraries not available - text-only processing")
             except Exception as e:
-                st.error(f"Failed to initialize system: {str(e)}")
+                st.error(f"❌ Failed to initialize system: {str(e)}")
                 st.stop()
 
     # Title and description
     st.title("🏠 HOA Document Q&A System")
-    st.markdown("<p style='font-size: 1em;'>Select an HOA and ask questions about their governing documents.</p>", unsafe_allow_html=True)
+    st.caption("🖼️ Enhanced with PDF Image Processing & OCR")
+    st.markdown("<p style='font-size: 1em;'>Select an HOA and ask questions about their governing documents. Now with image text extraction capabilities!</p>", unsafe_allow_html=True)
 
     # Load available HOA directories
     available_hoas = st.session_state.hoa_system.get_available_hoas()
     if not available_hoas:
-        st.info("No HOA directories found. Please upload your HOA documents to get started.")
+        st.info("📋 No HOA directories found. Please upload your HOA documents to get started.")
         st.markdown("""
         **To use this system:**
         1. Create folders for each HOA in the data directory
@@ -496,7 +585,7 @@ def main():
     )
 
     if not selected_hoa:
-        st.info("Please select an HOA to begin.")
+        st.info("📋 Please select an HOA to begin.")
         return
 
     # Initialize RAG system if HOA selection changed
@@ -504,13 +593,18 @@ def main():
         st.session_state.current_hoa = selected_hoa
         st.session_state.chat_history = []
 
-        with st.spinner(f"Loading {selected_hoa} documents..."):
-            result = st.session_state.hoa_system.load_single_hoa(selected_hoa)
-            if result["success"]:
-                st.success(f"✅ {selected_hoa} documents loaded successfully!")
-            else:
-                st.error(f"❌ Failed to load {selected_hoa} documents: {result['message']}")
-                return
+        # Only load if not already loaded (Streamlit Cloud optimization)
+        if selected_hoa not in st.session_state.loaded_hoas:
+            with st.spinner(f"📄 Loading {selected_hoa} documents with image processing..."):
+                result = st.session_state.hoa_system.load_single_hoa(selected_hoa)
+                if result["success"]:
+                    st.session_state.loaded_hoas.add(selected_hoa)
+                    st.success(f"✅ {selected_hoa} documents loaded successfully!")
+                else:
+                    st.error(f"❌ Failed to load {selected_hoa} documents: {result['message']}")
+                    return
+        else:
+            st.info(f"📁 {selected_hoa} documents already loaded from cache")
 
     # Display current HOA context
     st.info(f"📁 Currently querying: **{selected_hoa}**")
@@ -548,7 +642,7 @@ def main():
     col1, col2, col3 = st.columns([1, 1, 3])
     with col1:
         if st.button("🔍 Ask Question", type="primary", disabled=not question.strip()):
-            with st.spinner("🤔 Analyzing documents..."):
+            with st.spinner("🤔 Analyzing documents with image processing..."):
                 result = st.session_state.hoa_system.retrieve_and_answer(question, selected_hoa, 2, analysis_mode)
                 if result["error"]:
                     st.error(f"❌ Error: {result['error']}")
@@ -563,6 +657,19 @@ def main():
             st.session_state.chat_history = []
             st.rerun()
 
+    # Display system status in sidebar
+    with st.sidebar:
+        st.subheader("🖼️ Image Processing Status")
+        health = st.session_state.hoa_system.get_health_status()
+        if health["ocr_available"]:
+            st.success("✅ OCR Ready")
+        else:
+            st.warning("⚠️ OCR Not Available")
+        
+        if st.session_state.loaded_hoas:
+            st.subheader("📁 Loaded HOAs:")
+            for hoa in st.session_state.loaded_hoas:
+                st.write(f"✅ {hoa}")
 
 
 if __name__ == "__main__":
